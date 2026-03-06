@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 from datetime import datetime
 
-app = FastAPI(title="API EcoDash Honduras")
+app = FastAPI(title="EcoDash API Definitiva")
 
-# Permitir conexión desde tu página de Netlify
+# Permitir que tu web en Netlify lea este servidor
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -14,69 +14,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class BCHAzureExtractor:
-    def __init__(self):
-        # Conexión directa a la API Moderna de Azure del BCH
-        self.base_url = "https://bchapi-am.azure-api.net/api/v1/indicadores"
-        self.api_key = "d41d091369a344cba429d461ac4d6cbe"
+# Credenciales oficiales del BCH
+BCH_URL = "https://bchapi-am.azure-api.net/api/v1/indicadores"
+BCH_KEY = "d41d091369a344cba429d461ac4d6cbe"
 
-    def get_indicator(self, indicator_id, limit=30):
-        """Obtiene datos limpios en JSON de la API de Azure del BCH"""
-        url = f"{self.base_url}/{indicator_id}/cifras"
-        
-        # Enviamos la clave tanto en los parámetros como en los Headers (Estándar de Azure APIM)
-        params = {'formato': 'Json', 'clave': self.api_key}
-        headers = {
-            'Ocp-Apim-Subscription-Key': self.api_key,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                # Verificar que sea una lista con datos
-                if isinstance(data, list) and len(data) > 0:
-                    # Ordenar de más reciente a más antiguo
-                    data.sort(key=lambda x: x.get('fecha', ''), reverse=True)
-                    return data[:limit]
-            else:
-                print(f"BCH API Error: {response.status_code} - {response.text}")
-        except Exception as e:
-            print(f"Error fetching indicator {indicator_id} from Azure: {e}")
-        return []
-
-extractor = BCHAzureExtractor()
-
-@app.get("/api/bch/latest")
-def get_latest_data():
-    print("Obteniendo datos en vivo desde Azure BCH...")
-    
-    # Extraer Tipo de Cambio e Inflación (SIN YAHOO FINANCE)
-    tc_data = extractor.get_indicator("4", limit=30)
-    inf_data = extractor.get_indicator("2", limit=1)
-    
-    latest_tc = tc_data[0] if tc_data else {"valor": 0, "fecha": ""}
-    latest_inf = inf_data[0] if inf_data else {"valor": 0, "fecha": ""}
-
-    # Formatear el historial para el gráfico
-    historico_tc = []
-    for item in tc_data:
-        if 'fecha' in item and 'valor' in item:
-            fecha_limpia = item['fecha'].split('T')[0]
-            historico_tc.append({
-                "fecha": fecha_limpia,
-                "tasa": float(item['valor'])
-            })
-    # Invertir para gráfico cronológico
-    historico_tc.reverse()
-    
-    return {
+@app.get("/api/datos-maestros")
+def get_datos_maestros():
+    """
+    Extrae BCH (TC, Inflación, Histórico) y EMBI en una sola llamada segura.
+    Al hacerlo desde el servidor, evitamos los bloqueos CORS del navegador.
+    """
+    respuesta = {
         "status": "success",
         "timestamp": datetime.now().isoformat(),
-        "data": {
-            "inflacion": {"valor": float(latest_inf.get("valor", 0)), "fecha": latest_inf.get("fecha", "")},
-            "tipo_cambio": {"venta": float(latest_tc.get("valor", 0)), "fecha": latest_tc.get("fecha", "")},
-            "historico_tipo_cambio": historico_tc
-        }
+        "bch": None,
+        "embi": None,
+        "errores": []
     }
+
+    # 1. EXTRACCIÓN DEL BANCO CENTRAL DE HONDURAS (BCH)
+    try:
+        # Azure APIM requiere la clave en el Header
+        headers = {
+            "Ocp-Apim-Subscription-Key": BCH_KEY,
+            "User-Agent": "Mozilla/5.0"
+        }
+        params = {"formato": "Json"}
+
+        # Extraer Tipo de Cambio (Indicador 4) e Inflación (Indicador 2)
+        res_tc = requests.get(f"{BCH_URL}/4/cifras", headers=headers, params=params, timeout=15)
+        res_inf = requests.get(f"{BCH_URL}/2/cifras", headers=headers, params=params, timeout=15)
+
+        if res_tc.status_code == 200 and res_inf.status_code == 200:
+            tc_data = res_tc.json()
+            inf_data = res_inf.json()
+
+            # Ordenar para asegurar que el dato más reciente esté en la posición [0]
+            tc_data.sort(key=lambda x: x.get('fecha', ''), reverse=True)
+            inf_data.sort(key=lambda x: x.get('fecha', ''), reverse=True)
+
+            # Construir el objeto de respuesta del BCH
+            respuesta["bch"] = {
+                "tipo_cambio_actual": float(tc_data[0]['valor']) if tc_data else 0,
+                "inflacion_actual": float(inf_data[0]['valor']) if inf_data else 0,
+                # Extraemos los últimos 30 días estrictamente de esta misma fuente para el gráfico
+                "historico_tc": [
+                    {"fecha": item['fecha'].split('T')[0], "tasa": float(item['valor'])} 
+                    for item in tc_data[:30]
+                ]
+            }
+        else:
+            respuesta["errores"].append("BCH API rechazó la conexión.")
+    except Exception as e:
+        respuesta["errores"].append(f"Falla en extracción BCH: {str(e)}")
+
+    # 2. EXTRACCIÓN DEL RIESGO PAÍS (EMBI vía BCRP)
+    try:
+        url_embi = "https://estadisticas.bcrp.gob.pe/estadisticas/series/api/PD04698XD/json"
+        res_embi = requests.get(url_embi, timeout=15)
+        
+        if res_embi.status_code == 200:
+            embi_json = res_embi.json()
+            # Navegamos el JSON del BCRP para encontrar el último valor
+            ultimo_valor = embi_json['periods'][-1]['values'][0]
+            respuesta["embi"] = float(ultimo_valor)
+        else:
+            respuesta["errores"].append("BCRP API rechazó la conexión.")
+    except Exception as e:
+        respuesta["errores"].append(f"Falla en extracción EMBI: {str(e)}")
+
+    return respuesta
