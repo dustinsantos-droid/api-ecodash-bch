@@ -37,9 +37,10 @@ def get_datos_maestros():
         # Azure APIM requiere la clave en el Header
         headers = {
             "Ocp-Apim-Subscription-Key": BCH_KEY,
-            "User-Agent": "Mozilla/5.0"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         }
-        params = {"formato": "Json"}
+        # FIX 1: Faltaba incluir la clave 'BCH_KEY' en los parámetros (Azure la exige para dar acceso)
+        params = {"formato": "Json", "clave": BCH_KEY}
 
         # Extraer Tipo de Cambio (Indicador 4) e Inflación (Indicador 2)
         res_tc = requests.get(f"{BCH_URL}/4/cifras", headers=headers, params=params, timeout=15)
@@ -71,7 +72,9 @@ def get_datos_maestros():
     # 2. EXTRACCIÓN DEL RIESGO PAÍS (EMBI vía BCRP)
     try:
         url_embi = "https://estadisticas.bcrp.gob.pe/estadisticas/series/api/PD04698XD/json"
-        res_embi = requests.get(url_embi, timeout=15)
+        # FIX 2: Añadimos headers simulando un navegador (El BCRP bloquea servidores sin User-Agent)
+        headers_embi = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        res_embi = requests.get(url_embi, headers=headers_embi, timeout=15)
         
         if res_embi.status_code == 200:
             embi_json = res_embi.json()
